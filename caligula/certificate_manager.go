@@ -1,4 +1,5 @@
 // Copyright 2016 Google Inc. All Rights Reserved.
+// Copyright 2017 Pete Birley.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -31,6 +32,7 @@ type PKIConfig struct {
 	DNSNames    []string
 	IPAddresses []string
 	IssuePath   string
+	WritePath   string
 	Token       string
 	TTL         string
 }
@@ -112,6 +114,7 @@ func (cm *CertificateManager) SetCertificate() error {
 		return fmt.Errorf("certificate manager: error parsing pki secret: %v", err)
 	}
 
+
 	var certPEMBlock bytes.Buffer
 	certPEMBlock.WriteString(secret.Data.Certificate)
 	certPEMBlock.WriteString("\n")
@@ -121,6 +124,16 @@ func (cm *CertificateManager) SetCertificate() error {
 	if err != nil {
 		return fmt.Errorf("certificate manager: error parsing pki certificates: %v", err)
 	}
+
+	d1 := []byte(secret.Data.IssuingCA)
+	f1 := fmt.Sprintf("%s/tls.ca", cm.PKIConfig.WritePath )
+	ioutil.WriteFile(f1, d1, 0644)
+	d2 := []byte(secret.Data.Certificate)
+	f2 := fmt.Sprintf("%s/tls.crt", cm.PKIConfig.WritePath )
+	ioutil.WriteFile(f2, d2, 0644)
+	d3 := []byte(secret.Data.PrivateKey)
+	f3 := fmt.Sprintf("%s/tls.key", cm.PKIConfig.WritePath )
+	ioutil.WriteFile(f3, d3, 0644)
 
 	cm.Lock()
 	cm.certificate = &c

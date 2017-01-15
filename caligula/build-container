@@ -1,0 +1,5 @@
+#!/bin/bash
+./build
+docker build -t keyparty/caligula:0.0.1 .
+docker push keyparty/caligula:0.0.1
+rm caligula

@@ -1,3 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keyparty-curl-test
+data:
+  start.sh: |+
+    #!/bin/bash
+    set -x
+    WATCH_DIR=/var/run/secrets/keyparty
+    while true; do
+      sleep 10
+      date
+      curl --verbose \
+        --cert $WATCH_DIR/tls.crt \
+        --key $WATCH_DIR/tls.key \
+        --cacert $WATCH_DIR/tls.ca \
+        https://server.$POD_NAMESPACE.svc.cluster.local
+      openssl x509 -in $WATCH_DIR/tls.crt -text -noout
+    done
+---
 apiVersion: extensions/v1beta1
 kind: ReplicaSet
 metadata:
@@ -14,22 +34,32 @@ spec:
         pod.alpha.kubernetes.io/init-containers: '[
           {
             "name": "vault-init",
-            "image": "kelseyhightower/vault-init:0.0.1",
-            "imagePullPolicy": "Always",
+            "image": "docker.io/keyparty/vault-init:0.0.1",
+            "imagePullPolicy": "IfNotPresent",
             "env": [
               {
                 "name": "POD_NAME",
-                "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}
+                "valueFrom": {
+                  "fieldRef": {
+                    "APIVersion": "v1",
+                    "fieldPath": "metadata.name"
+                  }
+                }
               },
-              { 
+              {
                 "name": "POD_NAMESPACE",
-                "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}
+                "valueFrom": {
+                  "fieldRef": {
+                    "APIVersion": "v1",
+                    "fieldPath": "metadata.namespace"
+                  }
+                }
               },
-              { 
+              {
                 "name": "VAULT_ADDR",
                 "value": "http://vault:8200"
               },
-              { 
+              {
                 "name": "VAULT_CONTROLLER_ADDR",
                 "value": "http://vault-controller"
               }
@@ -45,13 +75,13 @@ spec:
     spec:
       containers:
         - name: client
-          image: "kelseyhightower/microservice:0.0.1"
-          imagePullPolicy: Always
+          image: "docker.io/keyparty/caligula:0.0.1"
+          imagePullPolicy: IfNotPresent
           env:
             - name: POD_IP
               valueFrom:
                 fieldRef:
-                  fieldPath: status.podIP 
+                  fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -59,9 +89,9 @@ spec:
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
-                  fieldPath: metadata.namespace 
+                  fieldPath: metadata.namespace
           args:
-            - "-addr=0.0.0.0:443"
+            - "-client"
             - "-client-pki-path=/pki/issue/client"
             - "-client-pki-ttl=60s"
             - "-cluster-domain=cluster.local"
@@ -70,9 +100,39 @@ spec:
             - "-namespace=$(POD_NAMESPACE)"
             - "-remote-addr=https://server"
             - "-vault-addr=http://vault:8200"
+            - "-write-cert-path=/var/run/secrets/keyparty"
           volumeMounts:
             - name: vault-token
               mountPath: "/var/run/secrets/vaultproject.io"
+            - name: tls-client-cert
+              mountPath: "/var/run/secrets/keyparty"
+        - name: client-container
+          image: "docker.io/keyparty/test-client:0.0.1"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          command:
+            - bash
+            - /tmp/start.sh
+          volumeMounts:
+            - name: tls-client-cert
+              mountPath: "/var/run/secrets/keyparty"
+            - name: start-sh
+              mountPath: /tmp/start.sh
+              subPath: start.sh
       volumes:
         - name: vault-token
-          emptyDir: {}
+          emptyDir:
+            medium: "Memory"
+        - name: tls-client-cert
+          emptyDir:
+            medium: "Memory"
+        - name: start-sh
+          configMap:
+            name: keyparty-curl-test
+            items:
+              - key: start.sh
+                path: start.sh

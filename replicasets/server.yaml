@@ -14,22 +14,32 @@ spec:
         pod.alpha.kubernetes.io/init-containers: '[
           {
             "name": "vault-init",
-            "image": "kelseyhightower/vault-init:0.0.1",
+            "image": "docker.io/keyparty/vault-init:0.0.1",
             "imagePullPolicy": "Always",
             "env": [
               {
                 "name": "POD_NAME",
-                "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}
+                "valueFrom": {
+                  "fieldRef": {
+                    "APIVersion": "v1",
+                    "fieldPath": "metadata.name"
+                  }
+                }
               },
-              { 
+              {
                 "name": "POD_NAMESPACE",
-                "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}
+                "valueFrom": {
+                  "fieldRef": {
+                    "APIVersion": "v1",
+                    "fieldPath": "metadata.namespace"
+                  }
+                }
               },
-              { 
+              {
                 "name": "VAULT_ADDR",
                 "value": "http://vault:8200"
               },
-              { 
+              {
                 "name": "VAULT_CONTROLLER_ADDR",
                 "value": "http://vault-controller"
               }
@@ -45,13 +55,13 @@ spec:
     spec:
       containers:
         - name: server
-          image: "kelseyhightower/microservice:0.0.1"
+          image: "docker.io/keyparty/caligula:0.0.1"
           imagePullPolicy: Always
           env:
             - name: POD_IP
               valueFrom:
                 fieldRef:
-                  fieldPath: status.podIP 
+                  fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -59,9 +69,8 @@ spec:
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
-                  fieldPath: metadata.namespace 
+                  fieldPath: metadata.namespace
           args:
-            - "-addr=0.0.0.0:443"
             - "-cluster-domain=cluster.local"
             - "-ip=$(POD_IP)"
             - "-name=$(POD_NAME)"
@@ -70,9 +79,211 @@ spec:
             - "-server-pki-ttl=60s"
             - "-service-name=server"
             - "-vault-addr=http://vault:8200"
+            - "-write-cert-path=/var/run/secrets/keyparty"
           volumeMounts:
             - name: vault-token
               mountPath: "/var/run/secrets/vaultproject.io"
+            - name: tls-server-certs
+              mountPath: "/var/run/secrets/keyparty"
+        - name: service-container
+          image: "docker.io/httpd:latest"
+          imagePullPolicy: Always
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          command:
+            - httpd
+            - -DFOREGROUND
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - apachectl
+                  - -k
+                  - graceful-stop
+          livenessProbe:
+            periodSeconds: 20
+            exec:
+              command:
+              - bash
+              - -c
+              - |
+                set -ex
+                WATCH_DIR=/var/run/secrets/keyparty
+                STATE_FILE=/tmp/watcher/current
+                function update_md5 () {
+                  md5sum ${WATCH_DIR}/* > ${STATE_FILE}
+                }
+                if [ ! -f "${STATE_FILE}" ]; then update_md5; fi
+                md5sum -c ${STATE_FILE} || (
+                  update_md5
+                  apachectl -k restart
+                )
+          volumeMounts:
+            - name: tls-server-certs
+              mountPath: /var/run/secrets/keyparty
+            - name: tls-watcher-tmp
+              mountPath: /tmp/watcher
+            - name: httpd-config
+              mountPath: /usr/local/apache2/conf/httpd.conf
+              subPath: httpd.conf
+            - name: httpd-config
+              mountPath: /usr/local/apache2/conf/extra/httpd-ssl.conf
+              subPath: httpd-ssl.conf
       volumes:
         - name: vault-token
+          emptyDir:
+            medium: "Memory"
+        - name: tls-server-certs
+          emptyDir:
+            medium: "Memory"
+        - name: tls-watcher-tmp
           emptyDir: {}
+        - name: httpd-config
+          configMap:
+            name: apache-config
+            items:
+              - key: httpd.conf
+                path: httpd.conf
+              - key: httpd-ssl.conf
+                path: httpd-ssl.conf
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: apache-config
+data:
+  httpd.conf: |+
+    ServerRoot "/usr/local/apache2"
+    Listen 80
+
+    LoadModule authn_file_module modules/mod_authn_file.so
+    LoadModule authn_core_module modules/mod_authn_core.so
+    LoadModule authz_host_module modules/mod_authz_host.so
+    LoadModule authz_groupfile_module modules/mod_authz_groupfile.so
+    LoadModule authz_user_module modules/mod_authz_user.so
+    LoadModule authz_core_module modules/mod_authz_core.so
+    LoadModule access_compat_module modules/mod_access_compat.so
+    LoadModule auth_basic_module modules/mod_auth_basic.so
+    LoadModule socache_shmcb_module modules/mod_socache_shmcb.so
+    LoadModule reqtimeout_module modules/mod_reqtimeout.so
+    LoadModule filter_module modules/mod_filter.so
+    LoadModule mime_module modules/mod_mime.so
+    LoadModule log_config_module modules/mod_log_config.so
+    LoadModule env_module modules/mod_env.so
+    LoadModule setenvif_module modules/mod_setenvif.so
+    LoadModule version_module modules/mod_version.so
+    LoadModule ssl_module modules/mod_ssl.so
+    LoadModule unixd_module modules/mod_unixd.so
+    LoadModule status_module modules/mod_status.so
+    LoadModule autoindex_module modules/mod_autoindex.so
+    LoadModule dir_module modules/mod_dir.so
+
+    <IfModule unixd_module>
+    User daemon
+    Group daemon
+    </IfModule>
+
+    ServerAdmin you@example.com
+
+    <Directory />
+        AllowOverride none
+        Require all denied
+    </Directory>
+
+    DocumentRoot "/usr/local/apache2/htdocs"
+    <Directory "/usr/local/apache2/htdocs">
+        Options Indexes FollowSymLinks
+        AllowOverride None
+        Require all granted
+    </Directory>
+
+    <IfModule dir_module>
+        DirectoryIndex index.html
+    </IfModule>
+
+    <Files ".ht*">
+        Require all denied
+    </Files>
+
+    ErrorLog /dev/stderr
+    LogLevel warn
+
+    <IfModule log_config_module>
+        LogFormat "%h %l %u %t \"%r\" %>s %b" common
+        CustomLog /dev/stdout common
+    </IfModule>
+
+
+    <IfModule mime_module>
+        TypesConfig conf/mime.types
+        AddType application/x-compress .Z
+        AddType application/x-gzip .gz .tgz
+    </IfModule>
+
+    # Configure mod_proxy_html to understand HTML4/XHTML1
+    <IfModule proxy_html_module>
+        Include conf/extra/proxy-html.conf
+    </IfModule>
+
+    # Secure (SSL/TLS) connections
+    Include conf/extra/httpd-ssl.conf
+    <IfModule ssl_module>
+        SSLRandomSeed startup builtin
+        SSLRandomSeed connect builtin
+    </IfModule>
+  httpd-ssl.conf: |+
+    Listen 443
+    SSLCipherSuite HIGH:MEDIUM:!MD5:!RC4
+    SSLProxyCipherSuite HIGH:MEDIUM:!MD5:!RC4
+    SSLHonorCipherOrder on
+    SSLProtocol all -SSLv3
+    SSLProxyProtocol all -SSLv3
+    SSLPassPhraseDialog  builtin
+    SSLSessionCache        "shmcb:/usr/local/apache2/logs/ssl_scache(512000)"
+    SSLSessionCacheTimeout  300
+
+
+    <VirtualHost _default_:443>
+
+        DocumentRoot "/usr/local/apache2/htdocs"
+        ServerName www.example.com:443
+        ServerAdmin you@example.com
+        ErrorLog "/dev/stderr"
+        TransferLog "/dev/stdout"
+
+        SSLEngine on
+
+        SSLCertificateFile "/run/secrets/keyparty/tls.crt"
+        SSLCertificateKeyFile "/run/secrets/keyparty/tls.key"
+        #SSLCertificateChainFile "/usr/local/apache2/conf/server-ca.crt"
+        SSLCACertificateFile "/run/secrets/keyparty/tls.ca"
+
+        #SSLCARevocationFile "/usr/local/apache2/conf/ssl.crl/ca-bundle.crl"
+        #SSLCARevocationCheck chain
+
+        SSLVerifyClient require
+        #SSLVerifyDepth  10
+
+        <FilesMatch "\.(cgi|shtml|phtml|php)$">
+            SSLOptions +StdEnvVars
+        </FilesMatch>
+        <Directory "/usr/local/apache2/cgi-bin">
+            SSLOptions +StdEnvVars
+        </Directory>
+
+
+        CustomLog "/dev/stdout" \
+                  "%t %h %{SSL_PROTOCOL}x %{SSL_CIPHER}x \"%r\" %b"
+
+    </VirtualHost>

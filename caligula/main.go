@@ -1,4 +1,5 @@
 // Copyright 2016 Google Inc. All Rights Reserved.
+// Copyright 2017 Pete Birley.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -12,13 +13,10 @@
 package main
 
 import (
-	"crypto/tls"
 	"crypto/x509"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -29,7 +27,7 @@ import (
 const tokenFile = "/var/run/secrets/vaultproject.io/secret.json"
 
 var (
-	addr          string
+	clientPKI     bool
 	clientPKIPath string
 	clientPKITTL  string
 	clusterDomain string
@@ -44,10 +42,11 @@ var (
 	subdomain     string
 	vaultAddr     string
 	vaultToken    string
+	writeCertPath string
 )
 
 func main() {
-	flag.StringVar(&addr, "addr", "0.0.0.0:443", "HTTPS service address")
+	flag.BoolVar(&clientPKI, "client", false, "Client PKI management Active")
 	flag.StringVar(&clientPKIPath, "client-pki-path", "", "PKI secret backend issue path (e.g., '/pki/issue/<role name>')")
 	flag.StringVar(&clientPKITTL, "client-pki-ttl", "60s", "certificate time to live")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain")
@@ -61,6 +60,7 @@ func main() {
 	flag.StringVar(&serviceName, "service-name", "", "Kubernetes service name that resolves to this Pod")
 	flag.StringVar(&subdomain, "subdomain", "", "subdomain as defined by pod.spec.subdomain")
 	flag.StringVar(&vaultAddr, "vault-addr", "https://vault:8200", "Vault service address")
+	flag.StringVar(&writeCertPath, "write-cert-path", "", "Directory path to write certificates to (e.g., '/var/run/secrets/keyparty')")
 	flag.Parse()
 
 	var wg sync.WaitGroup
@@ -74,10 +74,10 @@ func main() {
 	go tm.StartRenewToken()
 
 	if serviceName != "" {
-		go startServer()
+		go startServer(done, &wg)
 	}
 
-	if remoteAddr != "" {
+	if clientPKI == true {
 		go startClient(done, &wg)
 	}
 
@@ -90,7 +90,7 @@ func main() {
 	wg.Wait()
 }
 
-func startServer() {
+func startServer(done <-chan bool, wg *sync.WaitGroup) {
 	ipAddresses := []string{ip, "127.0.0.1"}
 	c := &PKIConfig{
 		Addr:        vaultAddr,
@@ -98,44 +98,9 @@ func startServer() {
 		DNSNames:    dnsNames(serviceName, ip, hostname, subdomain, namespace, clusterDomain),
 		IPAddresses: ipAddresses,
 		IssuePath:   serverPKIPath,
+		WritePath:  writeCertPath,
 		Token:       vaultToken,
 		TTL:         serverPKITTL,
-	}
-	cm, err := NewCertificateManager(c)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	go cm.StartRenewCertificate()
-
-	clientCAPool := x509.NewCertPool()
-	if ok := clientCAPool.AppendCertsFromPEM(cm.CACertificate); !ok {
-		log.Fatal("missing CA certificate")
-	}
-
-	server := http.Server{
-		Addr: addr,
-		TLSConfig: &tls.Config{
-			ClientAuth:     tls.RequireAndVerifyClientCert,
-			ClientCAs:      clientCAPool,
-			GetCertificate: cm.GetCertificate,
-		},
-	}
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Hello from %s service", serviceName)
-	})
-
-	log.Fatal(server.ListenAndServeTLS("", ""))
-}
-
-func startClient(done <-chan bool, wg *sync.WaitGroup) {
-	c := &PKIConfig{
-		Addr:       vaultAddr,
-		CommonName: podDomainName(ip, namespace, clusterDomain),
-		IssuePath:  clientPKIPath,
-		Token:      vaultToken,
-		TTL:        clientPKITTL,
 	}
 	cm, err := NewCertificateManager(c)
 	if err != nil {
@@ -151,28 +116,37 @@ func startClient(done <-chan bool, wg *sync.WaitGroup) {
 			if ok := rootCAPool.AppendCertsFromPEM(cm.CACertificate); !ok {
 				log.Fatal("missing CA certificate")
 			}
+		case <-done:
+			wg.Done()
+			return
+		}
+	}
+}
 
-			tr := &http.Transport{
-				TLSClientConfig: &tls.Config{
-					Certificates:       cm.Certificates(),
-					InsecureSkipVerify: false,
-					RootCAs:            rootCAPool,
-				},
-			}
-			client := &http.Client{Transport: tr}
+func startClient(done <-chan bool, wg *sync.WaitGroup) {
+	c := &PKIConfig{
+		Addr:       vaultAddr,
+		CommonName: podDomainName(ip, namespace, clusterDomain),
+		IssuePath:  clientPKIPath,
+		WritePath:  writeCertPath,
+		Token:      vaultToken,
+		TTL:        clientPKITTL,
+	}
+	cm, err := NewCertificateManager(c)
+	if err != nil {
+		log.Fatal(err)
+// Copyright 2017 Pete Birley.
+	}
 
-			resp, err := client.Get(remoteAddr)
-			if err != nil {
-				log.Println(err)
-				continue
-			}
+	go cm.StartRenewCertificate()
 
-			body, err := ioutil.ReadAll(resp.Body)
-			if err != nil {
-				log.Println(err)
-				continue
+	for {
+		select {
+		case <-time.After(5 * time.Second):
+			rootCAPool := x509.NewCertPool()
+			if ok := rootCAPool.AppendCertsFromPEM(cm.CACertificate); !ok {
+				log.Fatal("missing CA certificate")
 			}
-			log.Println(string(body))
 		case <-done:
 			wg.Done()
 			return
